@@ -325,8 +325,12 @@ def main():
         sys.exit(1)
     print("bot started", flush=True)
     offset = None
+    _r0 = api("getUpdates", offset=-1, limit=1)
+    if _r0.get("ok") and _r0.get("result"):
+        offset = _r0["result"][-1]["update_id"] + 1
+        print("пропускаю старые обновления до %d" % (offset - 1), flush=True)
     while True:
-        params = {"timeout": 50}
+        params = {"timeout": 25}
         if offset is not None:
             params["offset"] = offset
         res = api("getUpdates", **params)
