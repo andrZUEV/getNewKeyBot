@@ -1,64 +1,75 @@
-# VPN Key Bot
+# getNewKeyBot
 
-Telegram-бот для управления ключами VLESS + WebSocket + TLS (Xray).
+Telegram-бот для выдачи и отзыва ключей **VLESS + WebSocket + TLS** (Xray).
 Только стандартная библиотека Python — зависимостей нет.
 
-## Что умеет
+## Возможности
 
-- **Добавить клиента** — спрашивает имя, создаёт UUID, выдаёт три ссылки
+- **Добавить клиента** — спрашивает имя, генерирует UUID, выдаёт три ссылки
 - **Список клиентов** — кнопки с именами
-- **Карточка клиента** — новые ключи, переименование, удаление
-- Ключи сохраняются текстовыми файлами в `data/keys/<имя>.txt`
+- **Карточка клиента** — новые ключи, переименование, удаление (с подтверждением)
+- Ключи сохраняются текстовыми файлами: `data/keys/<имя>.txt`
 - Доступ только для указанных Telegram ID
+- Работает через long polling: входящие порты не нужны, боту всё равно, заблокирован ли IP сервера
 
 ## Схема
 
 ```
-Клиент -> Москва:443 (проброс TCP) -> Прага:443 (TLS) -> интернет
-        -> Прага:443 напрямую
-        -> Прага:443 (второй IP)
+Клиент ──> Москва:443 (проброс TCP) ──> Прага:443 (TLS) ──> интернет
+       ──> Прага:443 напрямую
+       ──> Прага:443 (второй IP)
 ```
 
 Три точки входа, один ключ. Выход всегда в Праге.
+Сертификат на московский домен лежит на Праге, поэтому TLS сквозной — Москва видит только шифрованный поток.
 
-## Установка на сервер
+## Установка
 
 ```bash
-git clone <repo> /tmp/vpnbot && cd /tmp/vpnbot
+git clone git@github.com:andrZUEV/getNewKeyBot.git /tmp/vpnbot
+cd /tmp/vpnbot
 bash install.sh
-nano /opt/vpnbot/config.json     # token + admins
+nano /opt/vpnbot/.env
 systemctl restart vpnbot
 journalctl -u vpnbot -f
 ```
 
-Конфиг бота:
+## Конфигурация
 
-```json
-{
-  "token": "123456:ABC-DEF...",
-  "admins": [123456789],
-  "xray_config": "/usr/local/etc/xray/config.json",
-  "xray_service": "xray",
-  "domains": {
-    "primary": "195-110-217-179.sslip.io",
-    "alt": "91-184-250-218.sslip.io",
-    "moscow": "45-154-185-199.sslip.io"
-  }
-}
-```
+Всё в файле `.env` рядом с `bot.py`. Шаблон — `.env.example`.
 
-`admins` — список Telegram ID, кому разрешено. Пустой список = доступ всем (не оставлять так).
-Свой ID бот покажет командой `/id`.
+| Переменная | Назначение |
+|---|---|
+| `BOT_TOKEN` | токен от [@BotFather](https://t.me/BotFather) |
+| `ADMIN_IDS` | Telegram ID через запятую. Пусто = доступ всем (не для прода) |
+| `XRAY_CONFIG` | путь к конфигу Xray, по умолчанию `/usr/local/etc/xray/config.json` |
+| `XRAY_SERVICE` | имя systemd-юнита Xray, по умолчанию `xray` |
+| `KEYS_DIR` | каталог для файлов с ключами, относительно каталога бота |
+| `DOMAIN_PRIMARY` | основной адрес (Прага) |
+| `DOMAIN_ALT` | резервный адрес (Прага, второй IP) |
+| `DOMAIN_MOSCOW` | адрес входа через Москву |
+
+Свой Telegram ID можно узнать у [@userinfobot](https://t.me/userinfobot) или командой `/id` в боте.
 
 ## Требования
 
 - Python 3.8+ (стандартная библиотека)
-- `xray` в PATH, конфиг в формате VLESS+WS+TLS, клиенты в `inbounds[0].settings.clients`
-- systemd
-- права root (перезапускает `xray` через systemctl)
+- `xray` в PATH, конфиг VLESS+WS+TLS, клиенты в `inbounds[0].settings.clients`
+- systemd, права root (бот перезапускает службу `xray`)
+
+## Файлы
+
+```
+bot.py             — бот
+.env.example       — шаблон конфигурации (публикуется)
+.env               — реальные секреты (в .gitignore)
+vpnbot.service     — systemd-юнит
+install.sh         — установка
+data/keys/         — текстовые файлы с ключами (в .gitignore)
+```
 
 ## Безопасность
 
-- Бот не слушает порты — работает через long polling, входящие соединения не нужны
-- Токен и `config.json` не коммитятся (см. `.gitignore`)
-- Список `admins` обязателен в проде
+- `.env` не попадает в git (`.gitignore`)
+- Бот не открывает портов — только исходящие запросы к Telegram
+- Список `ADMIN_IDS` обязателен в проде

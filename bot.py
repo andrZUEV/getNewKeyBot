@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Telegram-бот для управления ключами VLESS (Xray).
+"""Telegram-Р±РѕС‚ РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ РєР»СЋС‡Р°РјРё VLESS (Xray).
 
-Только стандартная библиотека — никаких зависимостей.
-Ключи хранятся текстовыми файлами в data/keys/<имя>.txt
+РўРѕР»СЊРєРѕ СЃС‚Р°РЅРґР°СЂС‚РЅР°СЏ Р±РёР±Р»РёРѕС‚РµРєР° вЂ” РЅРёРєР°РєРёС… Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№.
+РљР»СЋС‡Рё С…СЂР°РЅСЏС‚СЃСЏ С‚РµРєСЃС‚РѕРІС‹РјРё С„Р°Р№Р»Р°РјРё РІ data/keys/<РёРјСЏ>.txt
 """
 import json
 import os
@@ -14,17 +14,42 @@ import urllib.parse
 import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CFG_PATH = os.path.join(BASE, "config.json")
-KEYS_DIR = os.path.join(BASE, "data", "keys")
+ENV_PATH = os.path.join(BASE, ".env")
 
-with open(CFG_PATH, encoding="utf-8") as f:
-    CFG = json.load(f)
 
-TOKEN = CFG["token"]
-ADMINS = set(int(x) for x in CFG.get("admins", []))
-XRAY = CFG["xray_config"]
-DOM = CFG["domains"]
-SERVICE = CFG.get("xray_service", "xray")
+def load_env(path):
+    """Минимальный парсер .env: KEY=VALUE, комментарии через #."""
+    env = {}
+    if not os.path.exists(path):
+        return env
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+ENV = load_env(ENV_PATH)
+
+TOKEN = ENV.get("BOT_TOKEN", "").strip()
+ADMINS = set(
+    int(x) for x in ENV.get("ADMIN_IDS", "").replace(" ", "").split(",")
+    if x.strip().lstrip("-").isdigit()
+)
+XRAY = ENV.get("XRAY_CONFIG", "/usr/local/etc/xray/config.json")
+SERVICE = ENV.get("XRAY_SERVICE", "xray")
+
+_kd = ENV.get("KEYS_DIR", "data/keys")
+KEYS_DIR = _kd if os.path.isabs(_kd) else os.path.join(BASE, _kd)
+
+DOM = {
+    "primary": ENV.get("DOMAIN_PRIMARY", ""),
+    "alt": ENV.get("DOMAIN_ALT", ""),
+    "moscow": ENV.get("DOMAIN_MOSCOW", ""),
+}
 
 WAITING = {}  # user_id -> (action, data)
 
@@ -82,9 +107,9 @@ def save_keys(name, l):
     p = os.path.join(KEYS_DIR, "%s.txt" % name)
     with open(p, "w", encoding="utf-8") as f:
         f.write("# %s\n\n" % name)
-        f.write("# Прага (основной)\n%s\n\n" % l["primary"])
-        f.write("# Прага (резервный IP)\n%s\n\n" % l["alt"])
-        f.write("# Через Москву\n%s\n" % l["moscow"])
+        f.write("# РџСЂР°РіР° (РѕСЃРЅРѕРІРЅРѕР№)\n%s\n\n" % l["primary"])
+        f.write("# РџСЂР°РіР° (СЂРµР·РµСЂРІРЅС‹Р№ IP)\n%s\n\n" % l["alt"])
+        f.write("# Р§РµСЂРµР· РњРѕСЃРєРІСѓ\n%s\n" % l["moscow"])
     return p
 
 
@@ -97,42 +122,42 @@ def remove_keys(name):
 def fmt_links(name, l):
     return (
         "<b>%s</b>\n\n"
-        "<b>Прага</b>\n<code>%s</code>\n\n"
-        "<b>Прага-2</b>\n<code>%s</code>\n\n"
-        "<b>Москва</b>\n<code>%s</code>"
+        "<b>РџСЂР°РіР°</b>\n<code>%s</code>\n\n"
+        "<b>РџСЂР°РіР°-2</b>\n<code>%s</code>\n\n"
+        "<b>РњРѕСЃРєРІР°</b>\n<code>%s</code>"
         % (name, l["primary"], l["alt"], l["moscow"])
     )
 
 
 def kb_menu():
     return {"inline_keyboard": [
-        [{"text": "➕ Добавить клиента", "callback_data": "add"}],
-        [{"text": "📋 Список клиентов", "callback_data": "list"}],
+        [{"text": "вћ• Р”РѕР±Р°РІРёС‚СЊ РєР»РёРµРЅС‚Р°", "callback_data": "add"}],
+        [{"text": "рџ“‹ РЎРїРёСЃРѕРє РєР»РёРµРЅС‚РѕРІ", "callback_data": "list"}],
     ]}
 
 
 def kb_list():
-    rows = [[{"text": "👤 " + c.get("email", "?"), "callback_data": "c:" + c.get("email", "")}]
+    rows = [[{"text": "рџ‘¤ " + c.get("email", "?"), "callback_data": "c:" + c.get("email", "")}]
             for c in clients()]
     if not rows:
-        rows = [[{"text": "(пусто)", "callback_data": "menu"}]]
-    rows.append([{"text": "◀️ В меню", "callback_data": "menu"}])
+        rows = [[{"text": "(РїСѓСЃС‚Рѕ)", "callback_data": "menu"}]]
+    rows.append([{"text": "в—ЂпёЏ Р’ РјРµРЅСЋ", "callback_data": "menu"}])
     return {"inline_keyboard": rows}
 
 
 def kb_client(name):
     return {"inline_keyboard": [
-        [{"text": "🔑 Выдать новые ключи", "callback_data": "new:" + name}],
-        [{"text": "✏️ Переименовать", "callback_data": "ren:" + name}],
-        [{"text": "🗑 Удалить", "callback_data": "del:" + name}],
-        [{"text": "◀️ К списку", "callback_data": "list"}],
+        [{"text": "рџ”‘ Р’С‹РґР°С‚СЊ РЅРѕРІС‹Рµ РєР»СЋС‡Рё", "callback_data": "new:" + name}],
+        [{"text": "вњЏпёЏ РџРµСЂРµРёРјРµРЅРѕРІР°С‚СЊ", "callback_data": "ren:" + name}],
+        [{"text": "рџ—‘ РЈРґР°Р»РёС‚СЊ", "callback_data": "del:" + name}],
+        [{"text": "в—ЂпёЏ Рљ СЃРїРёСЃРєСѓ", "callback_data": "list"}],
     ]}
 
 
 def kb_confirm(name):
     return {"inline_keyboard": [
-        [{"text": "✅ Да, удалить", "callback_data": "delyes:" + name}],
-        [{"text": "◀️ Отмена", "callback_data": "c:" + name}],
+        [{"text": "вњ… Р”Р°, СѓРґР°Р»РёС‚СЊ", "callback_data": "delyes:" + name}],
+        [{"text": "в—ЂпёЏ РћС‚РјРµРЅР°", "callback_data": "c:" + name}],
     ]}
 
 
@@ -162,21 +187,21 @@ def handle_message(msg):
     text = (msg.get("text") or "").strip()
 
     if not is_admin(uid):
-        send(chat, "Доступ закрыт. Ваш ID: <code>%d</code>" % uid)
+        send(chat, "Р”РѕСЃС‚СѓРї Р·Р°РєСЂС‹С‚. Р’Р°С€ ID: <code>%d</code>" % uid)
         return
 
     if text in ("/start", "/menu"):
         WAITING.pop(uid, None)
-        send(chat, "Управление ключами VPN\nВыберите действие:", kb_menu())
+        send(chat, "РЈРїСЂР°РІР»РµРЅРёРµ РєР»СЋС‡Р°РјРё VPN\nР’С‹Р±РµСЂРёС‚Рµ РґРµР№СЃС‚РІРёРµ:", kb_menu())
         return
 
     if text == "/id":
-        send(chat, "Ваш ID: <code>%d</code>" % uid)
+        send(chat, "Р’Р°С€ ID: <code>%d</code>" % uid)
         return
 
     state = WAITING.pop(uid, None)
     if not state:
-        send(chat, "Не понял. /start", kb_menu())
+        send(chat, "РќРµ РїРѕРЅСЏР». /start", kb_menu())
         return
 
     action, data = state
@@ -184,30 +209,30 @@ def handle_message(msg):
     if action == "add":
         name = clean_name(text)
         if not name:
-            send(chat, "Недопустимое имя.")
+            send(chat, "РќРµРґРѕРїСѓСЃС‚РёРјРѕРµ РёРјСЏ.")
             return
         cfg = xload()
         cl = cfg["inbounds"][0]["settings"]["clients"]
         if any(c.get("email") == name for c in cl):
-            send(chat, "Клиент «%s» уже есть." % name)
+            send(chat, "РљР»РёРµРЅС‚ В«%sВ» СѓР¶Рµ РµСЃС‚СЊ." % name)
             return
         new_id = subprocess.run(["xray", "uuid"], capture_output=True, text=True).stdout.strip()
         cl.append({"id": new_id, "email": name})
         xsave(cfg)
         l = links_for(new_id, name)
         path = save_keys(name, l)
-        send(chat, "Ключи созданы и сохранены в <code>%s</code>\n\n%s" % (path, fmt_links(name, l)), kb_client(name))
+        send(chat, "РљР»СЋС‡Рё СЃРѕР·РґР°РЅС‹ Рё СЃРѕС…СЂР°РЅРµРЅС‹ РІ <code>%s</code>\n\n%s" % (path, fmt_links(name, l)), kb_client(name))
 
     elif action == "rename":
         old = data
         new = clean_name(text)
         if not new:
-            send(chat, "Недопустимое имя.")
+            send(chat, "РќРµРґРѕРїСѓСЃС‚РёРјРѕРµ РёРјСЏ.")
             return
         cfg = xload()
         cl = cfg["inbounds"][0]["settings"]["clients"]
         if any(c.get("email") == new for c in cl):
-            send(chat, "Имя «%s» занято." % new)
+            send(chat, "РРјСЏ В«%sВ» Р·Р°РЅСЏС‚Рѕ." % new)
             return
         for c in cl:
             if c.get("email") == old:
@@ -219,7 +244,7 @@ def handle_message(msg):
         for c in cl:
             if c.get("email") == new:
                 save_keys(new, links_for(c["id"], new))
-        send(chat, "Переименован: «%s» → «%s»" % (old, new), kb_client(new))
+        send(chat, "РџРµСЂРµРёРјРµРЅРѕРІР°РЅ: В«%sВ» в†’ В«%sВ»" % (old, new), kb_client(new))
 
 
 def handle_callback(cb):
@@ -234,14 +259,14 @@ def handle_callback(cb):
 
     if data == "menu":
         WAITING.pop(uid, None)
-        edit(chat, mid, "Управление ключами VPN\nВыберите действие:", kb_menu())
+        edit(chat, mid, "РЈРїСЂР°РІР»РµРЅРёРµ РєР»СЋС‡Р°РјРё VPN\nР’С‹Р±РµСЂРёС‚Рµ РґРµР№СЃС‚РІРёРµ:", kb_menu())
 
     elif data == "list":
-        edit(chat, mid, "<b>Клиенты</b>\nНажмите на имя для управления:", kb_list())
+        edit(chat, mid, "<b>РљР»РёРµРЅС‚С‹</b>\nРќР°Р¶РјРёС‚Рµ РЅР° РёРјСЏ РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ:", kb_list())
 
     elif data == "add":
         WAITING[uid] = ("add", None)
-        edit(chat, mid, "Введите имя нового клиента (например: <i>телефон</i>):")
+        edit(chat, mid, "Р’РІРµРґРёС‚Рµ РёРјСЏ РЅРѕРІРѕРіРѕ РєР»РёРµРЅС‚Р° (РЅР°РїСЂРёРјРµСЂ: <i>С‚РµР»РµС„РѕРЅ</i>):")
 
     elif data.startswith("c:"):
         name = data[2:]
@@ -250,10 +275,10 @@ def handle_callback(cb):
             if c.get("email") == name:
                 found = c
         if not found:
-            edit(chat, mid, "Клиент не найден.", kb_list())
+            edit(chat, mid, "РљР»РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ.", kb_list())
             return
         l = links_for(found["id"], name)
-        edit(chat, mid, fmt_links(name, l) + "\n\n<b>Управление:</b>", kb_client(name))
+        edit(chat, mid, fmt_links(name, l) + "\n\n<b>РЈРїСЂР°РІР»РµРЅРёРµ:</b>", kb_client(name))
 
     elif data.startswith("new:"):
         name = data[4:]
@@ -266,21 +291,21 @@ def handle_callback(cb):
                 c["id"] = new_id
                 ok = True
         if not ok:
-            edit(chat, mid, "Клиент не найден.", kb_list())
+            edit(chat, mid, "РљР»РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ.", kb_list())
             return
         xsave(cfg)
         l = links_for(new_id, name)
         save_keys(name, l)
-        edit(chat, mid, "🔑 Старые ключи отозваны.\n\n" + fmt_links(name, l), kb_client(name))
+        edit(chat, mid, "рџ”‘ РЎС‚Р°СЂС‹Рµ РєР»СЋС‡Рё РѕС‚РѕР·РІР°РЅС‹.\n\n" + fmt_links(name, l), kb_client(name))
 
     elif data.startswith("ren:"):
         name = data[4:]
         WAITING[uid] = ("rename", name)
-        edit(chat, mid, "Введите новое имя для «%s»:" % name, kb_client(name))
+        edit(chat, mid, "Р’РІРµРґРёС‚Рµ РЅРѕРІРѕРµ РёРјСЏ РґР»СЏ В«%sВ»:" % name, kb_client(name))
 
     elif data.startswith("del:"):
         name = data[4:]
-        edit(chat, mid, "Удалить клиента «%s»? Доступ будет отозван." % name, kb_confirm(name))
+        edit(chat, mid, "РЈРґР°Р»РёС‚СЊ РєР»РёРµРЅС‚Р° В«%sВ»? Р”РѕСЃС‚СѓРї Р±СѓРґРµС‚ РѕС‚РѕР·РІР°РЅ." % name, kb_confirm(name))
 
     elif data.startswith("delyes:"):
         name = data[7:]
@@ -290,10 +315,13 @@ def handle_callback(cb):
         ]
         xsave(cfg)
         remove_keys(name)
-        edit(chat, mid, "🗑 Удалён: «%s»" % name, kb_list())
+        edit(chat, mid, "рџ—‘ РЈРґР°Р»С‘РЅ: В«%sВ»" % name, kb_list())
 
 
 def main():
+    if not TOKEN or TOKEN.startswith("ВСТАВЬТЕ") or ":" not in TOKEN:
+        print("ОШИБКА: в .env не задан BOT_TOKEN", flush=True)
+        sys.exit(1)
     print("bot started", flush=True)
     offset = None
     while True:
