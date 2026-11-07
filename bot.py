@@ -60,8 +60,11 @@ def api(method, **params):
     try:
         with urllib.request.urlopen(req, timeout=65) as r:
             return json.load(r)
-    except Exception as e:
-        print("api error %s: %s" % (method, e), flush=True)
+        if "message is not modified" in body:
+            return {"ok": True, "ignored": True}
+        if "query is too old" in body:
+            return {"ok": False, "ignored": True}
+        print("api error %s: %s | %s" % (method, e, body), flush=True)
         return {"ok": False}
 
 
