@@ -147,7 +147,7 @@ def remove_keys(name):
 
 
 def fmt_links(name, l):
-    return "%s\n%s" % (name, l["moscow"])
+    return l["moscow"]
 
 
 def fmt_all(name, l):
@@ -253,7 +253,7 @@ def handle_message(msg):
         xsave(cfg)
         l = links_for(new_id, name)
         path = save_keys(name, l)
-        send(chat, "Ключи созданы и сохранены в <code>%s</code>\n\n%s" % (path, fmt_links(name, l)), kb_client(name))
+        send(chat, fmt_links(name, l), kb_client(name))
 
     elif action == "rename":
         old = data
@@ -310,7 +310,7 @@ def handle_callback(cb):
             edit(chat, mid, "Клиент не найден.", kb_list())
             return
         l = links_for(found["id"], name)
-        edit(chat, mid, fmt_links(name, l) + "\n\n<b>Управление:</b>", kb_client(name))
+        edit(chat, mid, fmt_links(name, l), kb_client(name))
 
     elif data.startswith("new:"):
         name = data[4:]
@@ -328,7 +328,7 @@ def handle_callback(cb):
         xsave(cfg)
         l = links_for(new_id, name)
         save_keys(name, l)
-        edit(chat, mid, "🔑 Старые ключи отозваны.\n\n" + fmt_links(name, l), kb_client(name))
+        edit(chat, mid, fmt_links(name, l), kb_client(name))
 
     elif data.startswith("ren:"):
         name = data[4:]
