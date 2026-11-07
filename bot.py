@@ -7,12 +7,24 @@
 """
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.error
 import urllib.request
+
+# Telegram стабильно доступен по IPv4, а IPv6-маршрут периодически
+# зависает в SYN-SENT на десятки секунд. Принудительно используем IPv4.
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+
+socket.getaddrinfo = _getaddrinfo_ipv4
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE, ".env")
@@ -59,7 +71,7 @@ def api(method, **params):
     body = json.dumps(params).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=65) as r:
+        with urllib.request.urlopen(req, timeout=(40 if method == "getUpdates" else 20)) as r:
             _res = json.load(r)
             if method != "getUpdates":
                 print("api ok: %s" % method, flush=True)
