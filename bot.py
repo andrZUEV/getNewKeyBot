@@ -339,6 +339,12 @@ def main():
             continue
         for upd in res.get("result", []):
             offset = upd["update_id"] + 1
+            if "callback_query" in upd:
+                print("CB data=%r from=%s" % (upd["callback_query"].get("data"),
+                                              upd["callback_query"]["from"]["id"]), flush=True)
+            elif "message" in upd:
+                print("MSG text=%r from=%s" % ((upd["message"].get("text") or "")[:40],
+                                               upd["message"]["from"]["id"]), flush=True)
             try:
                 if "message" in upd:
                     handle_message(upd["message"])
