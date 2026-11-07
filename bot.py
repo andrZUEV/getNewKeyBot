@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -60,11 +61,19 @@ def api(method, **params):
     try:
         with urllib.request.urlopen(req, timeout=65) as r:
             return json.load(r)
-        if "message is not modified" in body:
+    except urllib.error.HTTPError as e:
+        try:
+            text = e.read().decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        if "message is not modified" in text:
             return {"ok": True, "ignored": True}
-        if "query is too old" in body:
+        if "query is too old" in text:
             return {"ok": False, "ignored": True}
-        print("api error %s: %s | %s" % (method, e, body), flush=True)
+        print("api error %s: %s | %s" % (method, e, text), flush=True)
+        return {"ok": False}
+    except Exception as e:
+        print("api error %s: %s" % (method, e), flush=True)
         return {"ok": False}
 
 
@@ -98,7 +107,7 @@ def links_for(uid, name):
         out[key] = (
             "vless://%s@%s:443?encryption=none&security=tls&sni=%s"
             "&fp=chrome&type=ws&host=%s&path=%%2Fws#%s"
-            % (uid, d, d, d, urllib.parse.quote(name))
+            % (uid, d, d, d, name.replace(" ", "%20"))
         )
     return out
 
@@ -108,9 +117,9 @@ def save_keys(name, l):
     p = os.path.join(KEYS_DIR, "%s.txt" % name)
     with open(p, "w", encoding="utf-8") as f:
         f.write("# %s\n\n" % name)
-        f.write("# Прага (основной)\n%s\n\n" % l["primary"])
-        f.write("# Прага (резервный IP)\n%s\n\n" % l["alt"])
-        f.write("# Через Москву\n%s\n" % l["moscow"])
+        f.write("# Москва\n%s\n\n" % l["moscow"])
+        f.write("# Прага\n%s\n\n" % l["primary"])
+        f.write("# Прага-2\n%s\n" % l["alt"])
     return p
 
 
@@ -121,12 +130,16 @@ def remove_keys(name):
 
 
 def fmt_links(name, l):
+    return "%s\n%s" % (name, l["moscow"])
+
+
+def fmt_all(name, l):
     return (
         "<b>%s</b>\n\n"
+        "<b>Москва</b>\n<code>%s</code>\n\n"
         "<b>Прага</b>\n<code>%s</code>\n\n"
-        "<b>Прага-2</b>\n<code>%s</code>\n\n"
-        "<b>Москва</b>\n<code>%s</code>"
-        % (name, l["primary"], l["alt"], l["moscow"])
+        "<b>Прага-2</b>\n<code>%s</code>"
+        % (name, l["moscow"], l["primary"], l["alt"])
     )
 
 
@@ -150,6 +163,7 @@ def kb_client(name):
     return {"inline_keyboard": [
         [{"text": "🔑 Выдать новые ключи", "callback_data": "new:" + name}],
         [{"text": "✏️ Переименовать", "callback_data": "ren:" + name}],
+        [{"text": "🌐 Другие адреса", "callback_data": "all:" + name}],
         [{"text": "🗑 Удалить", "callback_data": "del:" + name}],
         [{"text": "◀️ К списку", "callback_data": "list"}],
     ]}
@@ -303,6 +317,17 @@ def handle_callback(cb):
         name = data[4:]
         WAITING[uid] = ("rename", name)
         edit(chat, mid, "Введите новое имя для «%s»:" % name, kb_client(name))
+
+    elif data.startswith("all:"):
+        name = data[4:]
+        found = None
+        for c in clients():
+            if c.get("email") == name:
+                found = c
+        if not found:
+            edit(chat, mid, "Клиент не найден.", kb_list())
+            return
+        edit(chat, mid, fmt_all(name, links_for(found["id"], name)), kb_client(name))
 
     elif data.startswith("del:"):
         name = data[4:]
