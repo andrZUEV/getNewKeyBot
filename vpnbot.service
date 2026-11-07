@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram VPN key bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/vpnbot/bot.py
+WorkingDirectory=/opt/vpnbot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
