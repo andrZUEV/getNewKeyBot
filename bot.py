@@ -60,15 +60,20 @@ def api(method, **params):
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=65) as r:
-            return json.load(r)
+            _res = json.load(r)
+            if method != "getUpdates":
+                print("api ok: %s" % method, flush=True)
+            return _res
     except urllib.error.HTTPError as e:
         try:
             text = e.read().decode("utf-8", "replace")
         except Exception:
             text = ""
         if "message is not modified" in text:
+            print("api %s: not modified -> ok" % method, flush=True)
             return {"ok": True, "ignored": True}
         if "query is too old" in text:
+            print("api %s: QUERY TOO OLD" % method, flush=True)
             return {"ok": False, "ignored": True}
         print("api error %s: %s | %s" % (method, e, text), flush=True)
         return {"ok": False}
