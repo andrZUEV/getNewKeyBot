@@ -58,9 +58,9 @@ _kd = ENV.get("KEYS_DIR", "data/keys")
 KEYS_DIR = _kd if os.path.isabs(_kd) else os.path.join(BASE, _kd)
 
 DOM = {
-    "primary": ENV.get("DOMAIN_PRIMARY", ""),
-    "alt": ENV.get("DOMAIN_ALT", ""),
-    "moscow": ENV.get("DOMAIN_MOSCOW", ""),
+    "s2": ENV.get("DOMAIN_SERVER2", ""),
+    "s2b": ENV.get("DOMAIN_SERVER2_ALT", ""),
+    "s1": ENV.get("DOMAIN_SERVER1", ""),
 }
 
 WAITING = {}
@@ -119,7 +119,7 @@ def clean_name(s):
 
 def links_for(uid, name):
     out = {}
-    for key in ("primary", "alt", "moscow"):
+    for key in ("s2", "s2b", "s1"):
         d = DOM[key]
         out[key] = (
             "vless://%s@%s:443?encryption=none&security=tls&sni=%s"
@@ -134,9 +134,9 @@ def save_keys(name, l):
     p = os.path.join(KEYS_DIR, "%s.txt" % name)
     with open(p, "w", encoding="utf-8") as f:
         f.write("# %s\n\n" % name)
-        f.write("# Москва\n%s\n\n" % l["moscow"])
-        f.write("# Прага\n%s\n\n" % l["primary"])
-        f.write("# Прага-2\n%s\n" % l["alt"])
+        f.write("# Сервер 1\n%s\n\n" % l["s1"])
+        f.write("# Сервер 2\n%s\n\n" % l["s2"])
+        f.write("# Сервер 2 (2-й IP)\n%s\n" % l["s2b"])
     return p
 
 
@@ -147,16 +147,16 @@ def remove_keys(name):
 
 
 def fmt_links(name, l):
-    return l["moscow"]
+    return l["s1"]
 
 
 def fmt_all(name, l):
     return (
         "<b>%s</b>\n\n"
-        "<b>Москва</b>\n<code>%s</code>\n\n"
-        "<b>Прага</b>\n<code>%s</code>\n\n"
-        "<b>Прага-2</b>\n<code>%s</code>"
-        % (name, l["moscow"], l["primary"], l["alt"])
+        "<b>Сервер 1</b>\n<code>%s</code>\n\n"
+        "<b>Сервер 2</b>\n<code>%s</code>\n\n"
+        "<b>Сервер 2 (2-й IP)</b>\n<code>%s</code>"
+        % (name, l["s1"], l["s2"], l["s2b"])
     )
 
 
