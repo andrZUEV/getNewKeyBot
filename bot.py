@@ -5,6 +5,7 @@
 Настройки читаются из .env рядом с bot.py.
 Ключи сохраняются текстовыми файлами в data/keys/<имя>.txt
 """
+import html
 import json
 import os
 import secrets
@@ -80,6 +81,12 @@ SUFFIX_LEN = 4         # сколько случайных символов до
 SUFFIX_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 NAME_MAX_BYTES = 48    # ограничение, чтобы callback_data влезал в лимит Telegram
 TELEGRAM_TEXT_LIMIT = 3800   # с запасом от лимита 4096
+
+# --- подписки ---
+# База токенов: {email: {"token": "..."}}. Файл общий с сервисом /opt/vpnsub.
+SUBS_DB = ENV.get("SUBS_DB", "/opt/vpnsub/subs.json")
+# Публичный адрес сервиса подписок (без завершающего слэша)
+SUB_BASE = ENV.get("SUB_BASE", "").rstrip("/")
 
 WAITING = {}
 
@@ -253,6 +260,84 @@ def parse_bulk(text):
     return prefix, count, None
 
 
+# ---------- подписки ----------
+
+def load_subs():
+    try:
+        with open(SUBS_DB, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_subs(db):
+    d = os.path.dirname(SUBS_DB)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = SUBS_DB + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(db, f, indent=2, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, SUBS_DB)
+
+
+def ensure_token(email):
+    """Вернуть токен клиента, создав его при необходимости."""
+    db = load_subs()
+    rec = db.get(email)
+    if not isinstance(rec, dict) or not rec.get("token"):
+        db[email] = {"token": secrets.token_urlsafe(24)}
+        save_subs(db)
+        rec = db[email]
+    return rec["token"]
+
+
+def sub_url(email):
+    if not SUB_BASE:
+        raise RuntimeError("в .env не задан SUB_BASE")
+    return "%s/sub/%s" % (SUB_BASE, ensure_token(email))
+
+
+def drop_token(email):
+    db = load_subs()
+    if email in db:
+        db.pop(email, None)
+        save_subs(db)
+
+
+def move_token(old, new):
+    db = load_subs()
+    if old in db:
+        db[new] = db.pop(old)
+        save_subs(db)
+
+
+def add_clients_bulk(prefix, count):
+    """Создать count клиентов с общим префиксом. Возвращает [(имя, uuid)].
+
+    Один перезапуск xray на всю пачку. При ошибке бросает RuntimeError,
+    и тогда на диск ничего не записано.
+    """
+    cfg = xload()
+    cl = cfg["inbounds"][0]["settings"]["clients"]
+    names = bulk_names(prefix, count, [c.get("email", "") for c in cl])
+
+    added = []
+    for name in names:
+        uid_new = subprocess.run(
+            ["xray", "uuid"], capture_output=True, text=True
+        ).stdout.strip()
+        if not uid_new:
+            raise RuntimeError("xray uuid не вернул значение")
+        cl.append({"id": uid_new, "email": name})
+        added.append((name, uid_new))
+
+    xsave(cfg)   # один перезапуск на всю пачку
+    for name, uid_new in added:
+        save_keys(name, links_for(uid_new, name))
+    return added
+
+
 def send_keys_chunked(chat, keys):
     """Отправить ключи порциями, разделяя их пустой строкой.
 
@@ -288,6 +373,7 @@ def kb_menu():
     return {"inline_keyboard": [
         [{"text": "➕ Добавить клиента", "callback_data": "add"}],
         [{"text": "➕ Добавить несколько", "callback_data": "addmany"}],
+        [{"text": "🔗 Подписки (несколько)", "callback_data": "submany"}],
         [{"text": "📋 Список клиентов", "callback_data": "list"}],
     ]}
 
@@ -304,6 +390,7 @@ def kb_list():
 def kb_client(name):
     return {"inline_keyboard": [
         [{"text": "🔑 Выдать новые ключи", "callback_data": "new:" + name}],
+        [{"text": "🔗 Подписка", "callback_data": "sub:" + name}],
         [{"text": "✏️ Переименовать", "callback_data": "ren:" + name}],
         [{"text": "🌐 Другие адреса", "callback_data": "all:" + name}],
         [{"text": "🗑 Удалить", "callback_data": "del:" + name}],
@@ -397,59 +484,48 @@ def handle_message(msg):
         path = save_keys(name, l)
         send(chat, fmt_links(name, l), kb_client(name))
 
-    elif action == "addmany":
+    elif action in ("addmany", "submany"):
         prefix, count, err = parse_bulk(text)
         if err:
             send(chat, "Не понял: %s.\nПример: <code>телефон 5</code>" % err)
             return
 
-        cfg = xload()
-        cl = cfg["inbounds"][0]["settings"]["clients"]
         try:
-            names = bulk_names(prefix, count, [c.get("email", "") for c in cl])
+            added = add_clients_bulk(prefix, count)
         except RuntimeError as e:
-            send(chat, "Не получилось: %s" % e)
+            send(chat, "Не получилось: %s" % html.escape(str(e)[:200]))
             return
-
-        added = []
-        for name in names:
-            uid_new = subprocess.run(
-                ["xray", "uuid"], capture_output=True, text=True
-            ).stdout.strip()
-            if not uid_new:
-                # конфиг на диск ещё не писали — ничего не сломано
-                send(chat, "Ошибка: <code>xray uuid</code> не вернул значение. "
-                           "Ничего не изменено.")
-                return
-            cl.append({"id": uid_new, "email": name})
-            added.append((name, uid_new))
-
-        try:
-            xsave(cfg)   # один перезапуск xray на всю пачку
         except Exception as e:
             send(chat, "Конфигурация не применена, старые ключи целы.\n<code>%s</code>"
-                       % str(e)[:300])
+                       % html.escape(str(e)[:300]))
             return
 
-        keys = []
-        for name, uid_new in added:
-            l = links_for(uid_new, name)
-            save_keys(name, l)
-            keys.append(fmt_links(name, l))
+        if action == "addmany":
+            # В ответ идут только ключи, без заголовка: сообщение должно
+            # начинаться сразу с ключа. Имя устройства видно в самом ключе
+            # после #, так что подпись не нужна.
+            items = [fmt_links(name, links_for(uid_new, name))
+                     for name, uid_new in added]
+            kind = "ключами"
+        else:
+            try:
+                items = [sub_url(name) for name, _ in added]
+            except Exception as e:
+                send(chat, "Клиенты созданы, но подписки не выданы: <code>%s</code>"
+                           % html.escape(str(e)[:200]), kb_menu())
+                return
+            kind = "подписками"
 
-        # В ответ идут только ключи, без заголовка: сообщение должно
-        # начинаться сразу с ключа. Имя устройства видно в самом ключе
-        # после #, так что подпись не нужна.
-        sent_msgs, failed_msgs = send_keys_chunked(chat, keys)
+        sent_msgs, failed_msgs = send_keys_chunked(chat, items)
 
         if failed_msgs:
             send(chat,
-                 "⚠️ <b>%d из %d</b> сообщений с ключами не доставлено "
+                 "⚠️ <b>%d из %d</b> сообщений с %s не доставлено "
                  "(сеть до Telegram).\n\n"
-                 "Клиенты созданы, ключи сохранены. Забрать их можно:\n"
+                 "Клиенты созданы, данные сохранены. Забрать их можно:\n"
                  "• «📋 Список клиентов» → нужное имя;\n"
                  "• файлы на сервере: <code>%s</code>"
-                 % (failed_msgs, sent_msgs + failed_msgs, KEYS_DIR),
+                 % (failed_msgs, sent_msgs + failed_msgs, kind, KEYS_DIR),
                  kb_menu())
 
     elif action == "rename":
@@ -473,6 +549,7 @@ def handle_message(msg):
         for c in cl:
             if c.get("email") == new:
                 save_keys(new, links_for(c["id"], new))
+        move_token(old, new)   # ссылка-подписка продолжает работать
         send(chat, "Переименован: «%s» → «%s»" % (old, new), kb_client(new))
 
 
@@ -507,6 +584,38 @@ def handle_callback(cb):
              "<code>телефон-a3k9</code>, <code>телефон-p7mq</code>, …\n\n"
              "Префикс может содержать пробелы: <code>Махов офис 3</code>.\n"
              "За один раз — до %d." % MAX_BULK)
+
+    elif data == "submany":
+        WAITING[uid] = ("submany", None)
+        edit(chat, mid,
+             "<b>Подписки для нескольких устройств</b>\n\n"
+             "Отправьте <b>префикс</b> и <b>количество</b>, как при добавлении:\n"
+             "<code>телефон 5</code>\n\n"
+             "Создам клиентов и выдам ссылки-подписки — по одной на устройство, "
+             "каждая с новой строки через пустую строку.\n"
+             "За один раз — до %d." % MAX_BULK)
+
+    elif data.startswith("sub:"):
+        name = data[4:]
+        found = next((c for c in clients() if c.get("email") == name), None)
+        if not found:
+            edit(chat, mid, "Клиент не найден.", kb_list())
+            return
+        try:
+            url = sub_url(name)
+        except Exception as e:
+            edit(chat, mid,
+                 "Не удалось выдать подписку: <code>%s</code>"
+                 % html.escape(str(e)[:200]), kb_client(name))
+            return
+        edit(chat, mid,
+             "<b>%s</b>\n\n"
+             "Ссылка-подписка (одна на все серверы):\n"
+             "<code>%s</code>\n\n"
+             "Добавьте её в Hiddify как «подписку» — конфиги будут обновляться "
+             "автоматически, в том числе когда появятся новые серверы "
+             "или протоколы."
+             % (html.escape(name), html.escape(url)), kb_client(name))
 
     elif data.startswith("c:"):
         name = data[2:]
@@ -566,6 +675,7 @@ def handle_callback(cb):
         ]
         xsave(cfg)
         remove_keys(name)
+        drop_token(name)   # ссылка-подписка тоже перестаёт действовать
         edit(chat, mid, "🗑 Удалён: «%s»" % name, kb_list())
 
 
