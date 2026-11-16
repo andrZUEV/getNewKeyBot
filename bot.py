@@ -259,6 +259,9 @@ def send_keys_chunked(chat, keys, header=None):
     Telegram не принимает сообщения длиннее 4096 символов, а одна ссылка
     vless:// занимает ~200, поэтому большая пачка режется на несколько
     сообщений. Формат внутри сообщения: ключ, пустая строка, ключ, ...
+
+    Возвращает (доставлено, не доставлено), чтобы вызывающий код мог
+    честно сообщить о сбое, а не сделать вид, что всё ушло.
     """
     chunks = []
     cur = ""
@@ -271,11 +274,15 @@ def send_keys_chunked(chat, keys, header=None):
     if cur.strip():
         chunks.append(cur.rstrip())
 
+    sent = failed = 0
     for i, ch in enumerate(chunks):
         if header and i == 0:
             ch = header + "\n\n" + ch
-        send(chat, ch, None, parse_mode=None)
-    return len(chunks)
+        if send(chat, ch, None, parse_mode=None).get("ok"):
+            sent += 1
+        else:
+            failed += 1
+    return sent, failed
 
 
 def kb_menu():
@@ -312,14 +319,29 @@ def kb_confirm(name):
     ]}
 
 
-def send(chat_id, text, keyboard=None, parse_mode="HTML"):
+def send(chat_id, text, keyboard=None, parse_mode="HTML", retries=4):
+    """Отправка с повторами.
+
+    Сеть до api.telegram.org периодически рвётся (Connection reset by peer),
+    и раньше ошибка отправки молча игнорировалась — админ мог не получить
+    ключи вовсе. Теперь пробуем несколько раз с нарастающей паузой.
+    """
     params = {"chat_id": chat_id, "text": text,
               "disable_web_page_preview": True}
     if parse_mode:
         params["parse_mode"] = parse_mode
     if keyboard:
         params["reply_markup"] = keyboard
-    return api("sendMessage", **params)
+
+    res = {"ok": False}
+    for attempt in range(retries):
+        res = api("sendMessage", **params)
+        if res.get("ok"):
+            return res
+        if attempt < retries - 1:
+            time.sleep(1 + attempt)
+    print("send failed after %d attempts" % retries, flush=True)
+    return res
 
 
 def edit(chat_id, message_id, text, keyboard=None):
@@ -416,12 +438,20 @@ def handle_message(msg):
             save_keys(name, l)
             keys.append(fmt_links(name, l))
 
-        nmsg = send_keys_chunked(chat, keys,
-                                 header="Готово: добавлено %d" % len(added))
-        send(chat,
-             "<b>Добавлены</b> (%d):\n%s\n\nСообщений с ключами: %d"
-             % (len(added), "\n".join("• " + n for n, _ in added), nmsg),
-             kb_menu())
+        # В ответ идут только ключи (как и договаривались): имя устройства
+        # видно в самом ключе после #.
+        sent_msgs, failed_msgs = send_keys_chunked(
+            chat, keys, header="Готово: добавлено %d" % len(added))
+
+        if failed_msgs:
+            send(chat,
+                 "⚠️ <b>%d из %d</b> сообщений с ключами не доставлено "
+                 "(сеть до Telegram).\n\n"
+                 "Клиенты созданы, ключи сохранены. Забрать их можно:\n"
+                 "• «📋 Список клиентов» → нужное имя;\n"
+                 "• файлы на сервере: <code>%s</code>"
+                 % (failed_msgs, sent_msgs + failed_msgs, KEYS_DIR),
+                 kb_menu())
 
     elif action == "rename":
         old = data
