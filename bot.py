@@ -253,12 +253,13 @@ def parse_bulk(text):
     return prefix, count, None
 
 
-def send_keys_chunked(chat, keys, header=None):
+def send_keys_chunked(chat, keys):
     """Отправить ключи порциями, разделяя их пустой строкой.
 
     Telegram не принимает сообщения длиннее 4096 символов, а одна ссылка
     vless:// занимает ~200, поэтому большая пачка режется на несколько
-    сообщений. Формат внутри сообщения: ключ, пустая строка, ключ, ...
+    сообщений. Никакого заголовка не добавляется: сообщение начинается
+    сразу с ключа, формат — ключ, пустая строка, ключ, ...
 
     Возвращает (доставлено, не доставлено), чтобы вызывающий код мог
     честно сообщить о сбое, а не сделать вид, что всё ушло.
@@ -275,9 +276,7 @@ def send_keys_chunked(chat, keys, header=None):
         chunks.append(cur.rstrip())
 
     sent = failed = 0
-    for i, ch in enumerate(chunks):
-        if header and i == 0:
-            ch = header + "\n\n" + ch
+    for ch in chunks:
         if send(chat, ch, None, parse_mode=None).get("ok"):
             sent += 1
         else:
@@ -438,10 +437,10 @@ def handle_message(msg):
             save_keys(name, l)
             keys.append(fmt_links(name, l))
 
-        # В ответ идут только ключи (как и договаривались): имя устройства
-        # видно в самом ключе после #.
-        sent_msgs, failed_msgs = send_keys_chunked(
-            chat, keys, header="Готово: добавлено %d" % len(added))
+        # В ответ идут только ключи, без заголовка: сообщение должно
+        # начинаться сразу с ключа. Имя устройства видно в самом ключе
+        # после #, так что подпись не нужна.
+        sent_msgs, failed_msgs = send_keys_chunked(chat, keys)
 
         if failed_msgs:
             send(chat,
