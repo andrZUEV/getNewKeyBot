@@ -25,6 +25,9 @@ CERT = os.environ.get("VPNSUB_CERT", "/usr/local/etc/xray/cert/fullchain.pem")
 KEY = os.environ.get("VPNSUB_KEY", "/usr/local/etc/xray/cert/privkey.pem")
 BIND = os.environ.get("VPNSUB_BIND", "0.0.0.0")
 PORT = int(os.environ.get("VPNSUB_PORT", "2096"))
+# Публичные параметры REALITY (pbk/sid/sni/port). Приватного ключа здесь нет:
+# он лежит только в конфиге Xray.
+REALITY = os.environ.get("VPNSUB_REALITY", "/opt/vpnsub/reality.json")
 
 # Порядок как в боте: Сервер 1, Сервер 2, второй адрес Сервера 2.
 DOMAIN_KEYS = ("DOMAIN_SERVER1", "DOMAIN_SERVER2", "DOMAIN_SERVER2_ALT")
@@ -75,20 +78,44 @@ def load_clients():
     return inbound["settings"]["clients"], inbound
 
 
+def load_reality():
+    """Публичные параметры REALITY-входа, если он настроен."""
+    try:
+        with open(REALITY, encoding="utf-8") as f:
+            r = json.load(f)
+        if all(r.get(k) for k in ("port", "pbk", "sid", "sni")):
+            return r
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def build_links(uid, name, inbound):
-    """Ссылки для всех точек входа по первому inbound (WS + TLS)."""
+    """Ссылки для всех точек входа: сначала WS+TLS, затем REALITY."""
     ss = inbound.get("streamSettings", {})
     port = int(inbound.get("port", 443))
     ws_path = ss.get("wsSettings", {}).get("path", "/ws")
     path = urllib.parse.quote(ws_path, safe="")   # "/ws" -> "%2Fws"
     frag = urllib.parse.quote(name or "", safe="")
+
     out = []
+    # 1) VLESS + WebSocket + TLS (как раньше)
     for dom in load_domains():
         out.append(
             "vless://%s@%s:%d?encryption=none&security=tls&sni=%s"
             "&fp=chrome&type=ws&host=%s&path=%s#%s"
             % (uid, dom, port, dom, dom, path, frag)
         )
+
+    # 2) VLESS + REALITY (маскируется под обычный TLS-сайт)
+    r = load_reality()
+    if r:
+        for dom in load_domains():
+            out.append(
+                "vless://%s@%s:%d?encryption=none&security=reality&sni=%s"
+                "&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s-reality"
+                % (uid, dom, int(r["port"]), r["sni"], r["pbk"], r["sid"], frag)
+            )
     return out
 
 

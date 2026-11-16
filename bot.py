@@ -9,6 +9,7 @@ import html
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -274,6 +275,14 @@ def save_subs(db):
     d = os.path.dirname(SUBS_DB)
     if d:
         os.makedirs(d, exist_ok=True)
+    # Страховка: перед перезаписью сохраняем предыдущую версию базы.
+    # Один раз уже случилось, что база была очищена целиком и токены
+    # восстановить было нельзя — теперь есть откат.
+    if os.path.exists(SUBS_DB):
+        try:
+            shutil.copy2(SUBS_DB, SUBS_DB + ".bak")
+        except OSError:
+            pass
     tmp = SUBS_DB + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(db, f, indent=2, ensure_ascii=False)
@@ -338,7 +347,7 @@ def add_clients_bulk(prefix, count):
     return added
 
 
-def send_keys_chunked(chat, keys):
+def send_keys_chunked(chat, keys, keyboard=None):
     """Отправить ключи порциями, разделяя их пустой строкой.
 
     Telegram не принимает сообщения длиннее 4096 символов, а одна ссылка
@@ -361,8 +370,11 @@ def send_keys_chunked(chat, keys):
         chunks.append(cur.rstrip())
 
     sent = failed = 0
-    for ch in chunks:
-        if send(chat, ch, None, parse_mode=None).get("ok"):
+    last = len(chunks) - 1
+    for i, ch in enumerate(chunks):
+        # Кнопки вешаем на ПОСЛЕДНЕЕ сообщение списка, чтобы они были под текстом.
+        kb = keyboard if i == last else None
+        if send(chat, ch, kb, parse_mode=None).get("ok"):
             sent += 1
         else:
             failed += 1
@@ -375,6 +387,15 @@ def kb_menu():
         [{"text": "➕ Добавить несколько", "callback_data": "addmany"}],
         [{"text": "🔗 Подписки (несколько)", "callback_data": "submany"}],
         [{"text": "📋 Список клиентов", "callback_data": "list"}],
+    ]}
+
+
+def kb_after():
+    """Кнопки под выданным списком ссылок."""
+    return {"inline_keyboard": [
+        [{"text": "◀️ В меню", "callback_data": "menu"}],
+        [{"text": "➕ Добавить подписку", "callback_data": "addsub"}],
+        [{"text": "➕ Добавить несколько подписок", "callback_data": "submany"}],
     ]}
 
 
@@ -516,7 +537,7 @@ def handle_message(msg):
                 return
             kind = "подписками"
 
-        sent_msgs, failed_msgs = send_keys_chunked(chat, items)
+        sent_msgs, failed_msgs = send_keys_chunked(chat, items, kb_after())
 
         if failed_msgs:
             send(chat,
@@ -527,6 +548,41 @@ def handle_message(msg):
                  "• файлы на сервере: <code>%s</code>"
                  % (failed_msgs, sent_msgs + failed_msgs, kind, KEYS_DIR),
                  kb_menu())
+
+    elif action == "addsub":
+        # Одна подписка: создаём одного клиента с указанным именем
+        # и выдаём его ссылку-подписку.
+        name = clean_name(text)
+        if not name:
+            send(chat, "Недопустимое имя.", kb_menu())
+            return
+        cfg = xload()
+        cl = cfg["inbounds"][0]["settings"]["clients"]
+        if any(c.get("email") == name for c in cl):
+            send(chat, "Клиент «%s» уже есть." % html.escape(name), kb_menu())
+            return
+        uid_new = subprocess.run(
+            ["xray", "uuid"], capture_output=True, text=True
+        ).stdout.strip()
+        if not uid_new:
+            send(chat, "Ошибка: <code>xray uuid</code> не вернул значение. "
+                       "Ничего не изменено.")
+            return
+        cl.append({"id": uid_new, "email": name})
+        try:
+            xsave(cfg)
+        except Exception as e:
+            send(chat, "Конфигурация не применена, старые ключи целы.\n<code>%s</code>"
+                       % html.escape(str(e)[:300]))
+            return
+        save_keys(name, links_for(uid_new, name))
+        try:
+            url = sub_url(name)
+        except Exception as e:
+            send(chat, "Клиент создан, но подписка не выдана: <code>%s</code>"
+                       % html.escape(str(e)[:200]), kb_menu())
+            return
+        send(chat, url, kb_after(), parse_mode=None)
 
     elif action == "rename":
         old = data
@@ -594,6 +650,13 @@ def handle_callback(cb):
              "Создам клиентов и выдам ссылки-подписки — по одной на устройство, "
              "каждая с новой строки через пустую строку.\n"
              "За один раз — до %d." % MAX_BULK)
+
+    elif data == "addsub":
+        WAITING[uid] = ("addsub", None)
+        edit(chat, mid,
+             "<b>Новая подписка</b>\n\n"
+             "Введите имя устройства (например: <i>телефон</i>) —\n"
+             "создам клиента и выдам его ссылку-подписку.")
 
     elif data.startswith("sub:"):
         name = data[4:]
