@@ -7,6 +7,7 @@
 """
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -63,6 +64,23 @@ DOM = {
     "s1": ENV.get("DOMAIN_SERVER1", ""),
 }
 
+# Порядок и подписи серверов в выдаче.
+# Пустой домен = сервер не настроен/выведен из эксплуатации: он просто
+# не попадает в ключи, вместо того чтобы выдавать нерабочую ссылку.
+SERVER_ORDER = (
+    ("s1", "Сервер 1"),
+    ("s2", "Сервер 2"),
+    ("s2b", "Сервер 2 (2-й IP)"),
+)
+
+# --- массовое добавление ---
+MAX_BULK = 50          # больше за раз не создаём (и Telegram, и xray)
+SUFFIX_LEN = 4         # сколько случайных символов добавляется к префиксу
+# без похожих символов (i/l/1/o/0), чтобы имя было легко продиктовать
+SUFFIX_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+NAME_MAX_BYTES = 48    # ограничение, чтобы callback_data влезал в лимит Telegram
+TELEGRAM_TEXT_LIMIT = 3800   # с запасом от лимита 4096
+
 WAITING = {}
 
 
@@ -100,8 +118,28 @@ def xload():
 
 
 def xsave(cfg):
-    with open(XRAY, "w", encoding="utf-8") as f:
+    """Записать конфиг атомарно и только после проверки, что xray его примет.
+
+    Раньше json.dump писал прямо в целевой файл: обрыв в момент записи
+    оставлял битый config.json, и xray больше не поднимался. Теперь сначала
+    пишем во временный файл, проверяем его `xray run -test` и лишь потом
+    подменяем атомарным os.replace().
+    """
+    tmp = XRAY + ".tmp.json"   # расширение важно: xray определяет формат по нему
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+    res = subprocess.run(["xray", "run", "-test", "-config", tmp], capture_output=True)
+    if res.returncode != 0:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        text = (res.stderr or res.stdout).decode("utf-8", "replace")
+        # отбрасываем баннер xray, оставляем суть
+        lines = [x.strip() for x in text.splitlines() if x.strip()]
+        err = " | ".join(lines[-2:])[:300] or "неизвестная ошибка"
+        raise RuntimeError("xray не принял конфигурацию: %s" % err)
+    os.replace(tmp, XRAY)
     subprocess.run(["systemctl", "restart", SERVICE], check=False)
     time.sleep(1)
 
@@ -119,8 +157,10 @@ def clean_name(s):
 
 def links_for(uid, name):
     out = {}
-    for key in ("s2", "s2b", "s1"):
-        d = DOM[key]
+    for key, _label in SERVER_ORDER:
+        d = (DOM.get(key) or "").strip()
+        if not d:
+            continue  # адрес не задан — не выдаём мёртвую ссылку
         out[key] = (
             "vless://%s@%s:443?encryption=none&security=tls&sni=%s"
             "&fp=chrome&type=ws&host=%s&path=%%2Fws#%s"
@@ -134,9 +174,9 @@ def save_keys(name, l):
     p = os.path.join(KEYS_DIR, "%s.txt" % name)
     with open(p, "w", encoding="utf-8") as f:
         f.write("# %s\n\n" % name)
-        f.write("# Сервер 1\n%s\n\n" % l["s1"])
-        f.write("# Сервер 2\n%s\n\n" % l["s2"])
-        f.write("# Сервер 2 (2-й IP)\n%s\n" % l["s2b"])
+        for key, label in SERVER_ORDER:
+            if key in l:
+                f.write("# %s\n%s\n\n" % (label, l[key]))
     return p
 
 
@@ -147,22 +187,101 @@ def remove_keys(name):
 
 
 def fmt_links(name, l):
-    return l["s1"]
+    for key, _label in SERVER_ORDER:
+        if key in l:
+            return l[key]
+    return "Ключи не настроены."
 
 
 def fmt_all(name, l):
-    return (
-        "<b>%s</b>\n\n"
-        "<b>Сервер 1</b>\n<code>%s</code>\n\n"
-        "<b>Сервер 2</b>\n<code>%s</code>\n\n"
-        "<b>Сервер 2 (2-й IP)</b>\n<code>%s</code>"
-        % (name, l["s1"], l["s2"], l["s2b"])
-    )
+    parts = ["<b>%s</b>" % name]
+    for key, label in SERVER_ORDER:
+        if key in l:
+            parts.append("<b>%s</b>\n<code>%s</code>" % (label, l[key]))
+    return "\n\n".join(parts)
+
+
+def _rand_suffix(n=SUFFIX_LEN):
+    return "".join(secrets.choice(SUFFIX_ALPHABET) for _ in range(n))
+
+
+def _truncate_bytes(s, limit):
+    """Обрезать строку до limit байт UTF-8, не разорвав символ."""
+    b = s.encode("utf-8")
+    if len(b) <= limit:
+        return s
+    return b[:limit].decode("utf-8", "ignore")
+
+
+def bulk_names(prefix, count, existing):
+    """Имена вида «префикс-a3k9», гарантированно уникальные.
+
+    Хвост случайный, но проверяем и на уже существующие имена, и внутри
+    пачки: коллизия на 4 символах маловероятна, но не невозможна.
+    """
+    taken = {(e or "").lower() for e in existing}
+    base_limit = max(1, NAME_MAX_BYTES - (1 + SUFFIX_LEN))
+    base = _truncate_bytes(clean_name(prefix), base_limit).strip() or "device"
+
+    out = []
+    guard = 0
+    while len(out) < count:
+        guard += 1
+        if guard > count * 200:
+            raise RuntimeError("не удалось подобрать уникальные имена")
+        name = "%s-%s" % (base, _rand_suffix())
+        if name.lower() in taken:
+            continue
+        taken.add(name.lower())
+        out.append(name)
+    return out
+
+
+def parse_bulk(text):
+    """'телефон 5' -> ('телефон', 5, None). Количество — последнее слово."""
+    parts = (text or "").split()
+    if len(parts) < 2:
+        return None, 0, "нужен формат: префикс и количество"
+    if not parts[-1].isdigit():
+        return None, 0, "количество должно быть числом в конце"
+    count = int(parts[-1])
+    prefix = clean_name(" ".join(parts[:-1]))
+    if not prefix:
+        return None, 0, "пустой префикс"
+    if count < 1 or count > MAX_BULK:
+        return None, 0, "количество должно быть от 1 до %d" % MAX_BULK
+    return prefix, count, None
+
+
+def send_keys_chunked(chat, keys, header=None):
+    """Отправить ключи порциями, разделяя их пустой строкой.
+
+    Telegram не принимает сообщения длиннее 4096 символов, а одна ссылка
+    vless:// занимает ~200, поэтому большая пачка режется на несколько
+    сообщений. Формат внутри сообщения: ключ, пустая строка, ключ, ...
+    """
+    chunks = []
+    cur = ""
+    for k in keys:
+        piece = k + "\n\n"
+        if cur and len(cur) + len(piece) > TELEGRAM_TEXT_LIMIT:
+            chunks.append(cur.rstrip())
+            cur = ""
+        cur += piece
+    if cur.strip():
+        chunks.append(cur.rstrip())
+
+    for i, ch in enumerate(chunks):
+        if header and i == 0:
+            ch = header + "\n\n" + ch
+        send(chat, ch, None, parse_mode=None)
+    return len(chunks)
 
 
 def kb_menu():
     return {"inline_keyboard": [
         [{"text": "➕ Добавить клиента", "callback_data": "add"}],
+        [{"text": "➕ Добавить несколько", "callback_data": "addmany"}],
         [{"text": "📋 Список клиентов", "callback_data": "list"}],
     ]}
 
@@ -193,9 +312,11 @@ def kb_confirm(name):
     ]}
 
 
-def send(chat_id, text, keyboard=None):
-    params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+def send(chat_id, text, keyboard=None, parse_mode="HTML"):
+    params = {"chat_id": chat_id, "text": text,
               "disable_web_page_preview": True}
+    if parse_mode:
+        params["parse_mode"] = parse_mode
     if keyboard:
         params["reply_markup"] = keyboard
     return api("sendMessage", **params)
@@ -255,6 +376,53 @@ def handle_message(msg):
         path = save_keys(name, l)
         send(chat, fmt_links(name, l), kb_client(name))
 
+    elif action == "addmany":
+        prefix, count, err = parse_bulk(text)
+        if err:
+            send(chat, "Не понял: %s.\nПример: <code>телефон 5</code>" % err)
+            return
+
+        cfg = xload()
+        cl = cfg["inbounds"][0]["settings"]["clients"]
+        try:
+            names = bulk_names(prefix, count, [c.get("email", "") for c in cl])
+        except RuntimeError as e:
+            send(chat, "Не получилось: %s" % e)
+            return
+
+        added = []
+        for name in names:
+            uid_new = subprocess.run(
+                ["xray", "uuid"], capture_output=True, text=True
+            ).stdout.strip()
+            if not uid_new:
+                # конфиг на диск ещё не писали — ничего не сломано
+                send(chat, "Ошибка: <code>xray uuid</code> не вернул значение. "
+                           "Ничего не изменено.")
+                return
+            cl.append({"id": uid_new, "email": name})
+            added.append((name, uid_new))
+
+        try:
+            xsave(cfg)   # один перезапуск xray на всю пачку
+        except Exception as e:
+            send(chat, "Конфигурация не применена, старые ключи целы.\n<code>%s</code>"
+                       % str(e)[:300])
+            return
+
+        keys = []
+        for name, uid_new in added:
+            l = links_for(uid_new, name)
+            save_keys(name, l)
+            keys.append(fmt_links(name, l))
+
+        nmsg = send_keys_chunked(chat, keys,
+                                 header="Готово: добавлено %d" % len(added))
+        send(chat,
+             "<b>Добавлены</b> (%d):\n%s\n\nСообщений с ключами: %d"
+             % (len(added), "\n".join("• " + n for n, _ in added), nmsg),
+             kb_menu())
+
     elif action == "rename":
         old = data
         new = clean_name(text)
@@ -299,6 +467,17 @@ def handle_callback(cb):
     elif data == "add":
         WAITING[uid] = ("add", None)
         edit(chat, mid, "Введите имя нового клиента (например: <i>телефон</i>):")
+
+    elif data == "addmany":
+        WAITING[uid] = ("addmany", None)
+        edit(chat, mid,
+             "<b>Массовое добавление</b>\n\n"
+             "Отправьте <b>префикс</b> и <b>количество</b> через пробел, например:\n"
+             "<code>телефон 5</code>\n\n"
+             "Каждому подключению добавится случайный хвост:\n"
+             "<code>телефон-a3k9</code>, <code>телефон-p7mq</code>, …\n\n"
+             "Префикс может содержать пробелы: <code>Махов офис 3</code>.\n"
+             "За один раз — до %d." % MAX_BULK)
 
     elif data.startswith("c:"):
         name = data[2:]
