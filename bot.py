@@ -152,8 +152,38 @@ def xsave(cfg):
     time.sleep(1)
 
 
+def vless_inbounds(cfg):
+    """Все inbound'ы с клиентами (WS, REALITY, ...).
+
+    Клиент обязан существовать в КАЖДОМ, иначе один и тот же UUID
+    работает на одном транспорте и не работает на другом.
+    """
+    return [ib for ib in cfg.get("inbounds", [])
+            if ib.get("protocol") == "vless"
+            and isinstance(ib.get("settings", {}).get("clients"), list)]
+
+
+def clients_of(cfg):
+    ibs = vless_inbounds(cfg)
+    return ibs[0]["settings"]["clients"] if ibs else []
+
+
+def add_client_all(cfg, name, uid_new):
+    """Добавить клиента во все транспорты."""
+    for ib in vless_inbounds(cfg):
+        ib["settings"]["clients"].append({"id": uid_new, "email": name})
+
+
+def for_each_client(cfg, name):
+    """Итератор по записям клиента во всех транспортах."""
+    for ib in vless_inbounds(cfg):
+        for c in ib["settings"]["clients"]:
+            if c.get("email") == name:
+                yield c
+
+
 def clients():
-    return xload()["inbounds"][0]["settings"]["clients"]
+    return clients_of(xload())
 
 
 def clean_name(s):
@@ -328,7 +358,7 @@ def add_clients_bulk(prefix, count):
     и тогда на диск ничего не записано.
     """
     cfg = xload()
-    cl = cfg["inbounds"][0]["settings"]["clients"]
+    cl = clients_of(cfg)
     names = bulk_names(prefix, count, [c.get("email", "") for c in cl])
 
     added = []
@@ -338,7 +368,7 @@ def add_clients_bulk(prefix, count):
         ).stdout.strip()
         if not uid_new:
             raise RuntimeError("xray uuid не вернул значение")
-        cl.append({"id": uid_new, "email": name})
+        add_client_all(cfg, name, uid_new)   # во все транспорты
         added.append((name, uid_new))
 
     xsave(cfg)   # один перезапуск на всю пачку
@@ -494,12 +524,12 @@ def handle_message(msg):
             send(chat, "Недопустимое имя.")
             return
         cfg = xload()
-        cl = cfg["inbounds"][0]["settings"]["clients"]
+        cl = clients_of(cfg)
         if any(c.get("email") == name for c in cl):
             send(chat, "Клиент «%s» уже есть." % name)
             return
         new_id = subprocess.run(["xray", "uuid"], capture_output=True, text=True).stdout.strip()
-        cl.append({"id": new_id, "email": name})
+        add_client_all(cfg, name, new_id)
         xsave(cfg)
         l = links_for(new_id, name)
         path = save_keys(name, l)
@@ -557,7 +587,7 @@ def handle_message(msg):
             send(chat, "Недопустимое имя.", kb_menu())
             return
         cfg = xload()
-        cl = cfg["inbounds"][0]["settings"]["clients"]
+        cl = clients_of(cfg)
         if any(c.get("email") == name for c in cl):
             send(chat, "Клиент «%s» уже есть." % html.escape(name), kb_menu())
             return
@@ -568,7 +598,7 @@ def handle_message(msg):
             send(chat, "Ошибка: <code>xray uuid</code> не вернул значение. "
                        "Ничего не изменено.")
             return
-        cl.append({"id": uid_new, "email": name})
+        add_client_all(cfg, name, uid_new)
         try:
             xsave(cfg)
         except Exception as e:
@@ -591,13 +621,12 @@ def handle_message(msg):
             send(chat, "Недопустимое имя.")
             return
         cfg = xload()
-        cl = cfg["inbounds"][0]["settings"]["clients"]
+        cl = clients_of(cfg)
         if any(c.get("email") == new for c in cl):
             send(chat, "Имя «%s» занято." % new)
             return
-        for c in cl:
-            if c.get("email") == old:
-                c["email"] = new
+        for c in for_each_client(cfg, old):
+            c["email"] = new
         xsave(cfg)
         old_file = os.path.join(KEYS_DIR, "%s.txt" % old)
         if os.path.exists(old_file):
@@ -695,13 +724,11 @@ def handle_callback(cb):
     elif data.startswith("new:"):
         name = data[4:]
         cfg = xload()
-        cl = cfg["inbounds"][0]["settings"]["clients"]
         new_id = subprocess.run(["xray", "uuid"], capture_output=True, text=True).stdout.strip()
         ok = False
-        for c in cl:
-            if c.get("email") == name:
-                c["id"] = new_id
-                ok = True
+        for c in for_each_client(cfg, name):
+            c["id"] = new_id
+            ok = True
         if not ok:
             edit(chat, mid, "Клиент не найден.", kb_list())
             return
@@ -733,9 +760,10 @@ def handle_callback(cb):
     elif data.startswith("delyes:"):
         name = data[7:]
         cfg = xload()
-        cfg["inbounds"][0]["settings"]["clients"] = [
-            c for c in cfg["inbounds"][0]["settings"]["clients"] if c.get("email") != name
-        ]
+        for ib in vless_inbounds(cfg):
+            ib["settings"]["clients"] = [
+                c for c in ib["settings"]["clients"] if c.get("email") != name
+            ]
         xsave(cfg)
         remove_keys(name)
         drop_token(name)   # ссылка-подписка тоже перестаёт действовать
