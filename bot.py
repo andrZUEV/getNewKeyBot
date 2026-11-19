@@ -66,10 +66,23 @@ DOM = {
     "s1": ENV.get("DOMAIN_SERVER1", ""),
 }
 
+# Роли доменов задаются явно: нумерация SERVER1/SERVER2 исторически не
+# совпадает с тем, кто вход, а кто выход.
+ENTRY_DOM = (ENV.get("DOMAIN_ENTRY") or "").strip()
+EXIT_DOM = (ENV.get("DOMAIN_EXIT") or "").strip()
+
+# Основной путь: московский вход пробрасывает трафик внутрь туннеля до Праги.
+TUNNEL_WS_PORT = int(ENV.get("TUNNEL_WS_PORT", "4443"))
+TUNNEL_REALITY_PORT = int(ENV.get("TUNNEL_REALITY_PORT", "8445"))
+REALITY_FILE = ENV.get("REALITY_FILE", "/opt/vpnsub/reality.json")
+
 # Порядок и подписи серверов в выдаче.
 # Пустой домен = сервер не настроен/выведен из эксплуатации: он просто
 # не попадает в ключи, вместо того чтобы выдавать нерабочую ссылку.
+# Первыми идут основные профили — через туннель, ниже прямые как резерв.
 SERVER_ORDER = (
+    ("tun", "Туннель (вход Москва)"),
+    ("tunr", "Туннель REALITY"),
     ("s1", "Сервер 1"),
     ("s2", "Сервер 2"),
     ("s2b", "Сервер 2 (2-й IP)"),
@@ -193,16 +206,52 @@ def clean_name(s):
     return s[:40]
 
 
+def load_reality_params():
+    """Публичные параметры REALITY (pbk/sid/sni). Приватного ключа тут нет."""
+    try:
+        with open(REALITY_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if all(d.get(k) for k in ("port", "pbk", "sid", "sni")):
+            return d
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def links_for(uid, name):
+    """Ссылки по точкам входа.
+
+    Основные — через туннель (вход Москва): они идут первыми, клиент берёт
+    первый рабочий профиль. Прямые входы остаются резервом.
+    """
+    frag = name.replace(" ", "%20")
     out = {}
-    for key, _label in SERVER_ORDER:
+
+    # --- основные: туннель Москва → Прага ---
+    if ENTRY_DOM:
+        out["tun"] = (
+            "vless://%s@%s:%d?encryption=none&security=tls&sni=%s"
+            "&fp=chrome&type=ws&host=%s&path=%%2Fws#%s"
+            % (uid, ENTRY_DOM, TUNNEL_WS_PORT, ENTRY_DOM, ENTRY_DOM, frag)
+        )
+        r = load_reality_params()
+        if r:
+            out["tunr"] = (
+                "vless://%s@%s:%d?encryption=none&security=reality&sni=%s"
+                "&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s-reality"
+                % (uid, ENTRY_DOM, TUNNEL_REALITY_PORT,
+                   r["sni"], r["pbk"], r["sid"], frag)
+            )
+
+    # --- резерв: прямые входы ---
+    for key in ("s1", "s2", "s2b"):
         d = (DOM.get(key) or "").strip()
         if not d:
             continue  # адрес не задан — не выдаём мёртвую ссылку
         out[key] = (
             "vless://%s@%s:443?encryption=none&security=tls&sni=%s"
             "&fp=chrome&type=ws&host=%s&path=%%2Fws#%s"
-            % (uid, d, d, d, name.replace(" ", "%20"))
+            % (uid, d, d, d, frag)
         )
     return out
 

@@ -32,6 +32,11 @@ REALITY = os.environ.get("VPNSUB_REALITY", "/opt/vpnsub/reality.json")
 # Порядок как в боте: Сервер 1, Сервер 2, второй адрес Сервера 2.
 DOMAIN_KEYS = ("DOMAIN_SERVER1", "DOMAIN_SERVER2", "DOMAIN_SERVER2_ALT")
 
+# Основной путь — московский вход, который пробрасывает трафик ВНУТРЬ
+# туннеля до Праги. Прямые входы оставлены резервом.
+TUNNEL_WS_PORT = int(os.environ.get("VPNSUB_TUNNEL_WS", "4443"))
+TUNNEL_REALITY_PORT = int(os.environ.get("VPNSUB_TUNNEL_RZ", "8445"))
+
 
 def log(msg):
     print(msg, flush=True)
@@ -63,6 +68,27 @@ def load_domains():
     return out
 
 
+def load_domains_map():
+    """Домены по ролям.
+
+    Нумерация SERVER1/SERVER2 в .env исторически не совпадает с ролями
+    (вход и выход), поэтому роли задаются явными переменными
+    DOMAIN_ENTRY (Москва, точка входа) и DOMAIN_EXIT (Прага, выход).
+    Если их нет — падаем на прежние имена.
+    """
+    env = load_env(ENVF)
+    out = {}
+    for k in DOMAIN_KEYS:
+        d = (env.get(k) or "").strip()
+        if d:
+            out[k] = d
+    entry = (env.get("DOMAIN_ENTRY") or "").strip()
+    exit_ = (env.get("DOMAIN_EXIT") or "").strip()
+    out["ENTRY"] = entry or out.get("DOMAIN_SERVER1") or ""
+    out["EXIT"] = exit_ or out.get("DOMAIN_SERVER2") or ""
+    return out
+
+
 def load_subs():
     try:
         with open(SUBS, encoding="utf-8") as f:
@@ -91,31 +117,68 @@ def load_reality():
 
 
 def build_links(uid, name, inbound):
-    """Ссылки для всех точек входа: сначала WS+TLS, затем REALITY."""
+    """Ссылки на клиента.
+
+    Порядок важен: клиент берёт первый рабочий профиль, поэтому сверху идут
+    основные — через туннель Москва → Прага. Прямые входы лежат ниже как
+    резерв на случай, если туннель недоступен.
+    """
     ss = inbound.get("streamSettings", {})
-    port = int(inbound.get("port", 443))
+    ws_port = int(inbound.get("port", 443))
     ws_path = ss.get("wsSettings", {}).get("path", "/ws")
     path = urllib.parse.quote(ws_path, safe="")   # "/ws" -> "%2Fws"
-    frag = urllib.parse.quote(name or "", safe="")
+    base = name or ""
+    r = load_reality()
+    dm = load_domains_map()
+    prague = dm.get("EXIT")            # выход, он же принимает напрямую
+    moscow = dm.get("ENTRY")           # точка входа, через неё идёт туннель
+    alt = dm.get("DOMAIN_SERVER2_ALT")
 
-    out = []
-    # 1) VLESS + WebSocket + TLS (как раньше)
-    for dom in load_domains():
-        out.append(
+    def ws_link(dom, port, frag):
+        return (
             "vless://%s@%s:%d?encryption=none&security=tls&sni=%s"
             "&fp=chrome&type=ws&host=%s&path=%s#%s"
-            % (uid, dom, port, dom, dom, path, frag)
+            % (uid, dom, port, dom, dom, path,
+               urllib.parse.quote(frag, safe=""))
         )
 
-    # 2) VLESS + REALITY (маскируется под обычный TLS-сайт)
-    r = load_reality()
-    if r:
-        for dom in load_domains():
-            out.append(
-                "vless://%s@%s:%d?encryption=none&security=reality&sni=%s"
-                "&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s-reality"
-                % (uid, dom, int(r["port"]), r["sni"], r["pbk"], r["sid"], frag)
-            )
+    def rz_link(dom, port, frag):
+        return (
+            "vless://%s@%s:%d?encryption=none&security=reality&sni=%s"
+            "&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s"
+            % (uid, dom, port, r["sni"], r["pbk"], r["sid"],
+               urllib.parse.quote(frag, safe=""))
+        )
+
+    out = []
+
+    # --- Основные: через туннель (вход Москва, выход Прага) ---
+    if moscow:
+        out.append(ws_link(moscow, TUNNEL_WS_PORT, base))
+        if r:
+            out.append(rz_link(moscow, TUNNEL_REALITY_PORT, base + "-reality"))
+
+    # --- Резерв: напрямую в Прагу ---
+    if prague:
+        out.append(ws_link(prague, ws_port, base + "-прямой-прага"))
+        if r:
+            out.append(rz_link(prague, int(r["port"]),
+                               base + "-прямой-прага-reality"))
+
+    # --- Резерв: напрямую в Москву (без туннеля) ---
+    if moscow:
+        out.append(ws_link(moscow, ws_port, base + "-прямой-мск"))
+        if r:
+            out.append(rz_link(moscow, int(r["port"]),
+                               base + "-прямой-мск-reality"))
+
+    # --- Второй адрес Москвы, если он задан отдельно ---
+    if alt and alt != moscow:
+        out.append(ws_link(alt, ws_port, base + "-прямой-мск2"))
+        if r:
+            out.append(rz_link(alt, int(r["port"]),
+                               base + "-прямой-мск2-reality"))
+
     return out
 
 
