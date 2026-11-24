@@ -124,7 +124,9 @@ def build_links(uid, name, inbound):
     резерв на случай, если туннель недоступен.
     """
     ss = inbound.get("streamSettings", {})
-    ws_port = int(inbound.get("port", 443))
+    # Публичный порт WS. НЕ порт из конфига xray: после переезда за nginx
+    # stream inbound слушает 127.0.0.1:10443, а наружу открыт 443.
+    ws_port = int(os.environ.get("VPNSUB_PUBLIC_WS_PORT", "443"))
     ws_path = ss.get("wsSettings", {}).get("path", "/ws")
     path = urllib.parse.quote(ws_path, safe="")   # "/ws" -> "%2Fws"
     base = name or ""
